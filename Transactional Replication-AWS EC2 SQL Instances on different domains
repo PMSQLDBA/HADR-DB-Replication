@@ -1,0 +1,439 @@
+Setup Transactional Replication between two AWS EC2 SQL Server Instances on different domains:
+--https://share.google/aimode/nOCrshgvqstXccX42
+
+To set up transactional replication between two AWS EC2 SQL Server instances in different domains, you must address two primary challenges: 
+network connectivity and authentication between untrusted domains.
+
+*******************************
+1. Network & Connectivity Setup
+*******************************
+Replication requires the Publisher and Subscriber to communicate over specific ports. [1, 2] 
+
+* Security Groups: Update the [AWS EC2 Security Groups](https://aws.amazon.com/blogs/database/native-sql-server-replication-options-on-amazon-rds-custom-for-sql-server/) 
+  for both instances to allow inbound traffic on Port 1433 (SQL Server).
+
+* Name Resolution: Because the instances are in different domains, they may not resolve each other's hostnames. 
+ Manually add entries to the Windows hosts file (C:\Windows\System32\drivers\etc\hosts) on both servers, mapping the private IP addresses to the SQL Server instance names. [2, 3, 4] 
+
+*******************************
+2. Authentication Strategy
+*******************************
+Since the domains do not trust each other, you have two main options:
+
+* SQL Server Authentication: This is often the simplest approach for cross-domain setups. 
+You must use a dedicated SQL login with sysadmin privileges on both instances to run the replication agents.
+
+* Mirroring Local Accounts: Create identical local Windows users (same username and password) on both EC2 instances. 
+Grant these accounts sysadmin rights in SQL Server and permissions to the Snapshot Folder. This mimics a trusted environment for the replication agents. [5, 6, 7, 8, 9] 
+
+*******************************
+3. Configuration Steps
+*******************************
+Follow these steps in SQL Server Management Studio (SSMS):
+
+   1. Configure Distribution:
+   * Right-click the Replication folder on the Publisher and select Configure Distribution.
+      * Set up a Snapshot Folder. If using a network share, ensure both the Publisher and Subscriber service accounts have read/write access to it.
+   2. Create Publication:
+   * Right-click Local Publications > New Publication.
+      * Select the source database and choose Transactional publication.
+      * Select the tables to replicate (they must have Primary Keys).
+   3. Create Subscription:
+   * Right-click the new publication and select New Subscriptions.
+      * Choose between a Push (Distributor pushes data) or Pull (Subscriber pulls data) subscription.
+      * In the Agent Security step, specify the SQL Server login or the mirrored local Windows account you created earlier.
+   4. Initialize:
+   * Allow the Snapshot Agent to generate the initial schema and data files. 
+Once complete, the Distribution Agent will apply them to the Subscriber to start the synchronization. 
+
+=====================================================================================================================================================================================
+
+T-SQL script template to automate the creation of the publication and subscription for this cross-domain environment:
+--https://share.google/aimode/8bzE1aPzOUHTYGOMQ
+
+Setting up replication between EC2 instances in different domains requires scripts that use SQL Server Authentication or local "mirrored" accounts, as standard domain authentication will fail. [1] 
+
+**************************************************
+Step 1: Configure Distribution (On Publisher)
+**************************************************
+Run this on the Publisher instance to set itself up as the Distributor. Replace 'DistributorPassword' with a strong password. [2] 
+
+-- Connect to the Publisher
+USE master;
+EXEC sp_adddistributor 
+@distributor = @@SERVERNAME, 
+@password = N'DistributorPassword';
+
+-- Create the distribution database
+EXEC sp_adddistributiondb 
+@database = N'distribution', 
+@security_mode = 1; -- 1 = Windows Auth for the local agent
+
+-- Enable the Publisher to use this Distributor
+EXEC sp_adddistpublisher 
+    @publisher = @@SERVERNAME, 
+    @distribution_db = N'distribution', 
+    @security_mode = 1, 
+    @working_directory = N'\\Your-EC2-IP\ReplSnapshot'; -- Use a UNC path accessible by both
+GO
+
+**************************************************
+Step 2: Create Publication (On Publisher)
+**************************************************
+Enable the database for replication and add the tables (articles).
+
+USE [YourDatabaseName];-- Enable replication for this DB
+EXEC sp_replicationdboption 
+@dbname = N'YourDatabaseName', 
+@optname = N'publish', 
+@value = N'true';
+
+-- Add the publication
+EXEC sp_addpublication 
+    @publication = N'CrossDomainPub', 
+    @repl_freq = N'continuous',
+    @status = N'active', 
+    @independent_agent = N'true';
+
+-- Add the Snapshot Agent (using a local mirrored account or SQL login)
+EXEC sp_addpublication_snapshot 
+   @publication = N'CrossDomainPub', 
+    @frequency_type = 1, 
+    @publisher_security_mode = 0, -- 0 = SQL Server Authentication
+    @publisher_login = N'ReplicationUser', 
+    @publisher_password = N'StrongPassword';
+
+-- Add a specific table as an article
+EXEC sp_addarticle 
+    @publication = N'CrossDomainPub', 
+    @article = N'YourTableName', 
+    @source_object = N'YourTableName', 
+    @destination_table = N'YourTableName', 
+    @type = N'logbased';
+GO
+
+**************************************************
+Step 3: Create Push Subscription (On Publisher)
+**************************************************
+This script defines the Subscriber server. 
+Since it is cross-domain, you must explicitly use a [SQL Server login]
+(https://aws.amazon.com/blogs/database/native-sql-server-replication-options-on-amazon-rds-custom-for-sql-server/) for the connection to the Subscriber.
+
+USE [YourDatabaseName];
+-- Add the subscription metadata
+EXEC sp_addsubscription 
+    @publication = N'CrossDomainPub', 
+    @subscriber = N'Subscriber-EC2-Hostname', -- Must be resolvable via hosts file
+    @destination_db = N'SubscriberDBName', 
+    @subscription_type = N'Push';
+
+-- Configure the Distribution Agent to use SQL Authentication for the Subscriber
+EXEC sp_addpushsubscription_agent 
+    @publication = N'CrossDomainPub', 
+    @subscriber = N'Subscriber-EC2-Hostname', 
+    @subscriber_db = N'SubscriberDBName', 
+    @subscriber_security_mode = 0, -- 0 = SQL Authentication
+    @subscriber_login = N'ReplicationUser', 
+    @subscriber_password = N'StrongPassword',
+    @job_login = null, 
+    @job_password = null; -- Agent runs under SQL Agent account
+GO
+
+Critical Verification Checklist
+**Hostnames: Ensure Subscriber-EC2-Hostname in the script matches the entry in your C:\Windows\System32\drivers\etc\hosts file.
+**Snapshot Share: The @working_directory must be a folder shared via Windows (SMB) where the Subscriber’s service account has Read access and the Publisher has Write access.
+**Permissions: The ReplicationUser must be a member of the db_owner role on both the publication and subscription databases.
+* Snapshot Share: The @working_directory must be a folder shared via Windows (SMB) where the Subscriber’s service account has Read access and the Publisher has Write access.
+* Permissions: The ReplicationUser must be a member of the db_owner role on both the publication and subscription databases. [2, 7, 8] 
+
+************************************************************************************************************************************
+Verify the Snapshot Agent status to ensure the initial data transfer has started
+************************************************************************************************************************************
+To verify the Snapshot Agent status and ensure your initial data transfer is proceeding correctly, you can use either the Graphical User Interface (SSMS) or a T-SQL query on the Distributor.
+
+Option 1: Using SQL Server Management Studio (SSMS)
+
+This is the most intuitive method for a quick visual check. 
+   1. Connect to the Publisher instance in SSMS.
+   2. Expand the Replication folder, then expand Local Publications.
+   3. Right-click your publication (e.g., CrossDomainPub) and select View Snapshot Agent Status.
+   4. In the dialog box, you will see the current status (e.g., "Starting", "In progress", or "Completed").
+   * If it hasn't started, click Start to manually trigger the snapshot generation.
+      * Check the Message area for details like "Bulk copying data into table...". [1, 4, 5, 6, 7] 
+   
+Option 2: Using T-SQL (On the Distributor)
+
+If you prefer scripting or need to check from a command line, run the following query on the server acting as the Distributor (usually your Publisher in this setup).
+
+USE distribution;
+GO
+SELECT 
+    p.publication AS [Publication Name],
+    s.agent_name AS [Agent Name],
+    CASE s.status
+        WHEN 1 THEN 'Started'
+        WHEN 2 THEN 'Succeeded'
+        WHEN 3 THEN 'In progress'
+        WHEN 4 THEN 'Idle'
+        WHEN 5 THEN 'Retrying'
+        WHEN 6 THEN 'Failed'
+    END AS [Status],
+    s.start_time AS [Start Time],
+    s.comments AS [Last Message]FROM dbo.MSsnapshot_history sJOIN dbo.MSsnapshot_agents p ON s.agent_id = p.idWHERE s.timestamp = (
+    SELECT MAX(timestamp) 
+    FROM dbo.MSsnapshot_history 
+    WHERE agent_id = p.id
+)ORDER BY p.publication;
+
+What to Look For
+
+* "Completed" Status: Once the Snapshot Agent finishes, it creates the schema and data files in your Snapshot Folder. Replication will not begin moving data until this status is achieved.
+* Distribution Agent: After the snapshot is ready, you must also check the Distribution Agent (via Replication Monitor) to ensure it is successfully applying those files to the Subscriber.
+* Agent Errors: If the status shows "Failed," check the Error details in SSMS. 
+Common cross-domain issues include Access Denied on the snapshot folder share or Login Failed for the subscriber account.
+
+
+**********************************************************************************************************
+How to troubleshoot the "Access Denied" error if the Snapshot Agent fails to write to your AWS file share
+**********************************************************************************************************
+In a cross-domain EC2 setup, "Access Denied" usually happens because the SQL Server Agent service on the Publisher cannot write to the folder, or the Subscriber cannot read from it.
+
+Follow these steps to resolve permissions for the Snapshot Folder:
+
+1. Match the Local Service Accounts
+Since there is no domain trust, you must use "Mirrored" local accounts.
+
+* Create an identical user (e.g., .\ReplUser) on both EC2 instances.
+* Use the exact same password for both.
+* Go to services.msc and set the SQL Server Agent service to "Log On As" this new ReplUser.
+
+2. Configure the Windows Folder Share
+On the instance hosting the snapshot folder (usually the Publisher):
+
+* Right-click folder > Properties > Sharing > Advanced Sharing:
+* Check "Share this folder."
+* Click Permissions and add the local ReplUser. Grant Full Control.
+* Properties > Security tab (NTFS):
+* Add the local ReplUser. Grant Modify or Full Control.
+
+3. Use the UNC Path (Not a Drive Letter)
+In your replication scripts or SSMS wizard, never use C:\ReplData. 
+You must use the Universal Naming Convention (UNC) path so the Subscriber can find it over the network:
+
+* Correct: \\Publisher-Private-IP\ReplSnapshot
+* Incorrect: C:\ReplSnapshot
+
+4. Test Connectivity via File Explorer
+To confirm the "bridge" is working:
+
+   1. Log into the Subscriber EC2 as ReplUser.
+   2. Open File Explorer and paste the UNC path (e.g., \\10.0.x.x\ReplSnapshot) into the address bar.
+   3. If you can create a new text file in that folder from the Subscriber, the "Access Denied" error will disappear.
+
+5. Update the SQL Agent Job
+If you already tried to start the agent and it failed, the login might be cached.
+
+* Open SQL Server Agent > Jobs.
+* Find the Snapshot Agent job (it will have a long name like Publisher-DB-Pub-1).
+* Right-click > Properties > Steps > Edit.
+* Ensure the command uses the -PublisherSecurityMode 0 (SQL Auth) if you are passing credentials through the command line.
+
+***************************************************************************************************************************
+PowerShell commands to quickly create these local users and set folder permissions across both servers
+***************************************************************************************************************************
+To automate the setup of mirrored accounts and the snapshot folder share across your EC2 instances, you can use these 
+[PowerShell](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.localaccounts/new-localuser?view=powershell-5.1) scripts.
+
+1. Create Mirrored Local User
+Run this script on both the Publisher and Subscriber EC2 instances. Ensure the password matches exactly on both servers to allow the cross-domain "handshake". [1, 2] 
+
+# Run on BOTH Publisher and Subscriber EC2s
+$Username = "ReplUser"
+$Password = ConvertTo-SecureString "YourStrongPassword!123" -AsPlainText -Force
+# Create the Local User
+New-LocalUser -Name $Username -Password $Password -Description "SQL Replication Mirrored Account" -PasswordNeverExpires $true
+# Add to Local Administrators (Optional but recommended for SQL Agent permissions)
+Add-LocalGroupMember -Group "Administrators" -Member $Username
+
+2. Configure Snapshot Folder and Share
+Run this script on the Publisher EC2. It creates the folder, applies the necessary NTFS permissions, and creates the 
+[SMB network share](https://learn.microsoft.com/en-us/powershell/module/smbshare/new-smbshare?view=windowsserver2025-ps). [3, 4, 5] 
+
+# Run on the PUBLISHER EC2 only
+$Path = "C:\ReplSnapshot"
+$Username = "ReplUser"
+# 1. Create Folder if it doesn't existif (!(Test-Path $Path)) { New-Item -ItemType Directory -Path $Path }
+# 2. Set NTFS Permissions (Modify access for the replication account)
+$Acl = Get-Acl $Path
+$Ar = New-Object System.Security.AccessControl.FileSystemAccessRule($Username, "Modify", "ContainerInherit,ObjectInherit", "None", "Allow")
+$Acl.SetAccessRule($Ar)
+Set-Acl $Path $Acl
+# 3. Create SMB Share for the Subscriber to access
+New-SmbShare -Name "ReplSnapshot" -Path $Path -FullAccess $Username
+
+3. Verification Commands
+After running the scripts, you can verify the setup from the Subscriber EC2 to ensure the cross-domain access is working:
+
+* Test Network Path: Open PowerShell on the Subscriber and run Test-Path "\\Publisher-Private-IP\ReplSnapshot". It should return True.
+* Check Shared Folders: Run Get-SmbShare -Name "ReplSnapshot" on the Publisher to confirm the share is active. [4] 
+
+Next Steps:
+Once these permissions are set, you can restart the SQL Server Agent on both servers using the ReplUser account. 
+
+********************************************************************
+Commands for re-pointing the SQL Agent service to this new account:
+********************************************************************
+To re-point the SQL Server Agent service to your new mirrored account, you can use WMI (Windows Management Instrumentation) via PowerShell. 
+This method is preferred over standard Set-Service commands because it correctly updates the service's internal 
+[security identifiers (SIDs)](https://learn.microsoft.com/en-us/sql/database-engine/configure-windows/scm-services-change-the-service-startup-account?view=sql-server-ver17) and permissions required by SQL Server. [1, 2, 3] 
+
+PowerShell Command to Update Service Account:
+=============================================
+Run this on both the Publisher and Subscriber instances. 
+Replace YourStrongPassword!123 with the password you set in the previous step.
+
+# Specify the service name (standard instance is 'SQLSERVERAGENT')
+$ServiceName = "SQLSERVERAGENT"
+$NewUser = ".\ReplUser"
+$NewPassword = "YourStrongPassword!123"
+# Retrieve the service via WMI
+$Service = Get-WmiObject Win32_Service | Where-Object { $_.Name -eq $ServiceName }
+# Change the Logon account and password# Parameters: Name, DisplayName, PathName, ServiceType, ErrorControl, StartMode, DesktopInteract, StartName, StartPassword...
+$Result = $Service.Change($null, $null, $null, $null, $null, $null, $NewUser, $NewPassword, $null, $null, $null)
+# Verify the result (0 = Success)if ($Result.ReturnValue -eq 0) {
+    Write-Host "Successfully updated $ServiceName to log on as $NewUser" -ForegroundColor Green
+    Restart-Service $ServiceName -Force
+    Write-Host "Service restarted." -ForegroundColor Cyan
+} else {
+    Write-Host "Failed to update service. Error code: $($Result.ReturnValue)" -ForegroundColor Red
+}
+
+Important Execution Details
+
+* Run as Administrator: You must launch the PowerShell console with Elevated Privileges for the Change method to work.
+* Service Name: If you are using a Named Instance (e.g., EC2AMAZ-ABC\SQL2019), the service name will be SQLAgent$SQL2019. You can find the exact name by running Get-Service *SQLAGENT*.
+* Downtime: Changing the service account [requires a restart](https://www.youtube.com/watch?v=30pw4O_hBvg) of the SQL Server Agent service. Existing replication jobs will pause briefly during this window.
+* Permissions: The Change method automatically grants the "Log on as a service" right to the new account on the local machine. [4, 5, 6] 
+
+Post-Change Verification
+After running the command, open SQL Server Configuration Manager or services.msc to confirm the "Log On As" column now shows .\ReplUser.
+
+************************************************************************************************************************
+How to configure the SQL Server Logins for this account so it has the necessary sysadmin rights to manage replication?
+************************************************************************************************************************
+To allow the replication agent to function across untrusted domains, the local [mirrored account]
+(https://stackoverflow.com/questions/19730218/setup-replication-on-two-database-on-different-domain) must be granted administrative access within SQL Server on both the Publisher and Subscriber instances,
+
+SQL Server Permission Requirements
+Replication tasks typically require the following [security roles](https://learn.microsoft.com/en-us/sql/relational-databases/replication/security/security-role-requirements-for-replication?view=sql-server-ver17): [2] 
+
+* sysadmin: Required on the Publisher to enable databases and manage the Distributor.
+* db_owner: Required on the distribution database and the specific publication or subscription database for the agent account to operate.
+
+T-SQL Configuration Script:
+Run this script in SQL Server Management Studio (SSMS) on both the Publisher and Subscriber. 
+It creates the login for your local Windows user and grants it the necessary sysadmin role to bypass individual database permission hurdles.
+
+-- Replace 'YourServerName' with the actual local hostname of the EC2
+-- Replace 'ReplUser' with the mirrored account name you created earlier
+
+USE [master];
+GO
+-- 1. Create a SQL login from the local Windows accountCREATE LOGIN [YourServerName\ReplUser] FROM WINDOWS;
+GO
+-- 2. Grant the sysadmin server role-- For SQL Server 2012 and newer:ALTER SERVER ROLE [sysadmin] ADD MEMBER [YourServerName\ReplUser];
+GO
+-- For older versions (pre-2012):
+-- EXEC sp_addsrvrolemember 'YourServerName\ReplUser', 'sysadmin';-- GO
+
+Alternative: Least Privilege (Recommended for Production)
+If you prefer not to grant full sysadmin rights for security reasons, you must explicitly map the user to the following:
+
+   1. On Publisher: Add to db_owner on the publication database and the distribution database.
+   2. On Subscriber: Add to db_owner on the subscription database.
+   3. Publication Access List (PAL): Ensure the login is added to the [PAL](https://learn.microsoft.com/en-us/sql/relational-databases/replication/security/secure-the-publisher?view=sql-server-ver17) of your publication. [3, 4, 7] 
+
+Next Steps:
+Once the permissions are in place, you are ready to start the Snapshot Agent. 
+
+*******************************************************************************
+How to monitor Replication Monitor for real-time performance and error tracking?
+*******************************************************************************
+
+To monitor your cross-domain transactional replication in real-time, use SQL Server Replication Monitor in SSMS. 
+This tool is essential for identifying whether performance bottlenecks or errors are occurring at the Publisher, Distributor, or Subscriber. 
+1. Launching Replication Monitor
+
+* Connect to your Publisher instance in SSMS.
+* Right-click the Replication folder and select Launch Replication Monitor.
+* Expand the Publisher in the left pane to see your specific publications.
+
+2. Tracking Real-Time Performance (Tracer Tokens)
+The most effective way to measure cross-domain latency (which can be higher due to network hops between AWS VPCs or regions) is by using Tracer Tokens.
+
+* In Replication Monitor, select your publication and go to the Tracer Tokens tab.
+* Click Insert Tracer. This sends a tiny "heartbeat" transaction through the system.
+* Monitor the three latency columns:
+* Publisher to Distributor: Time taken for the Log Reader Agent to move data from the transaction log to the distribution database.
+   * Distributor to Subscriber: Time taken for the Distribution Agent to move data from the Distributor to your secondary EC2.
+   * Total Latency: The end-to-end delay. 
+
+3. Pinpointing Errors by Agent
+If replication stops, Replication Monitor will show a red "X". Use the All Subscriptions tab to find the failing agent: 
+
+* Log Reader Agent Error: The issue is between the Publisher and Distributor. Often caused by high transaction volume or disk I/O on the Publisher.
+* Distribution Agent Error: The issue is between the Distributor and Subscriber. 
+In cross-domain setups, this is typically a network timeout or permission error (Access Denied) when trying to connect to the remote Subscriber. 
+
+4. Advanced Troubleshooting
+
+* View Details: Right-click a subscription and select View Details to see a chronological history of agent messages.
+* Undistributed Commands: Check the Distributor to Subscriber History tab to see how many commands are waiting in the distribution database. 
+  A high number indicates the Subscriber cannot keep up.
+* Validation: You can right-click a subscription and select Validate Subscription to ensure the row counts on the Publisher and Subscriber match. 
+
+*****************************************************************************************************************
+T-SQL query to check for "undistributed commands" directly from the distribution database without using the UI?
+*****************************************************************************************************************
+To check for replication lag and "undistributed commands" (commands that have reached the Distributor but haven't been applied to the Subscriber yet) without using the UI, 
+run this query on the Distributor (usually your Publisher EC2).
+
+T-SQL: Check Undistributed Command Count
+This query identifies which subscriptions are falling behind and exactly how many transactions are waiting in the queue.
+
+USE [distribution];
+GO
+SELECT 
+    s.name AS [Subscriber],
+    su.publisher_db AS [PublisherDB],
+    su.publication AS [Publication],
+    SUM(count_diff) AS [Undistributed_Command_Count],
+    -- Estimates time to catch up based on current agent speed
+    MAX(delivery_rate) AS [Current_Delivery_Rate_Cmds_Per_Sec]FROM dbo.MSdistribution_status dsJOIN dbo.MSdistribution_agents s ON ds.agent_id = s.idJOIN dbo.MSsubscriptions su ON s.subscriber_id = su.subscriber_idGROUP BY s.name, su.publisher_db, su.publication;
+GO
+
+T-SQL: View Detailed Agent Latency
+If you want to see the specific latency (in seconds) for the last run of the Distribution Agent, use this query:
+
+USE [distribution];
+GO
+SELECT 
+    publication AS [Publication],
+    subscriber_db AS [SubscriberDB],
+    CASE status 
+        WHEN 1 THEN 'Started'
+        WHEN 2 THEN 'Succeeded'
+        WHEN 3 THEN 'In progress'
+        WHEN 4 THEN 'Idle'
+        WHEN 5 THEN 'Retrying'
+        WHEN 6 THEN 'Failed'
+    END AS [AgentStatus],
+    delivery_latency / 1000 AS [Latency_Seconds], -- Converted from ms
+    last_run_getdate AS [LastSyncTime]FROM dbo.MSdistribution_historyWHERE id IN (SELECT MAX(id) FROM dbo.MSdistribution_history GROUP BY agent_id)ORDER BY last_run_getdate DESC;
+GO
+
+Why commands get "stuck" in Cross-Domain setups:
+
+   1. Network Latency: High latency between AWS VPCs can slow down the acknowledgment of each batch of commands.
+   2. Batch Size: The default -CommitBatchSize (100) might be too small for high-volume cross-domain traffic.
+   3. Permissions: If the ReplUser password was changed on one node but not the other, the agent will go into a "Retrying" state, increasing the undistributed count.
