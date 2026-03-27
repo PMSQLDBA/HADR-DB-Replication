@@ -7,7 +7,7 @@ network connectivity and authentication between untrusted domains.
 *******************************
 1. Network & Connectivity Setup
 *******************************
-Replication requires the Publisher and Subscriber to communicate over specific ports. [1, 2] 
+Replication requires the Publisher and Subscriber to communicate over specific ports.
 
 * Security Groups: Update the [AWS EC2 Security Groups](https://aws.amazon.com/blogs/database/native-sql-server-replication-options-on-amazon-rds-custom-for-sql-server/) 
   for both instances to allow inbound traffic on Port 1433 (SQL Server).
@@ -24,7 +24,7 @@ Since the domains do not trust each other, you have two main options:
 You must use a dedicated SQL login with sysadmin privileges on both instances to run the replication agents.
 
 * Mirroring Local Accounts: Create identical local Windows users (same username and password) on both EC2 instances. 
-Grant these accounts sysadmin rights in SQL Server and permissions to the Snapshot Folder. This mimics a trusted environment for the replication agents. [5, 6, 7, 8, 9] 
+Grant these accounts sysadmin rights in SQL Server and permissions to the Snapshot Folder. This mimics a trusted environment for the replication agents.
 
 *******************************
 3. Configuration Steps
@@ -51,12 +51,12 @@ Once complete, the Distribution Agent will apply them to the Subscriber to start
 T-SQL script template to automate the creation of the publication and subscription for this cross-domain environment:
 --https://share.google/aimode/8bzE1aPzOUHTYGOMQ
 
-Setting up replication between EC2 instances in different domains requires scripts that use SQL Server Authentication or local "mirrored" accounts, as standard domain authentication will fail. [1] 
+Setting up replication between EC2 instances in different domains requires scripts that use SQL Server Authentication or local "mirrored" accounts, as standard domain authentication will fail. 
 
 **************************************************
 Step 1: Configure Distribution (On Publisher)
 **************************************************
-Run this on the Publisher instance to set itself up as the Distributor. Replace 'DistributorPassword' with a strong password. [2] 
+Run this on the Publisher instance to set itself up as the Distributor. Replace 'DistributorPassword' with a strong password. 
 
 -- Connect to the Publisher
 USE master;
@@ -144,7 +144,7 @@ Critical Verification Checklist
 **Snapshot Share: The @working_directory must be a folder shared via Windows (SMB) where the Subscriber’s service account has Read access and the Publisher has Write access.
 **Permissions: The ReplicationUser must be a member of the db_owner role on both the publication and subscription databases.
 * Snapshot Share: The @working_directory must be a folder shared via Windows (SMB) where the Subscriber’s service account has Read access and the Publisher has Write access.
-* Permissions: The ReplicationUser must be a member of the db_owner role on both the publication and subscription databases. [2, 7, 8] 
+* Permissions: The ReplicationUser must be a member of the db_owner role on both the publication and subscription databases.
 
 ************************************************************************************************************************************
 Verify the Snapshot Agent status to ensure the initial data transfer has started
@@ -152,7 +152,7 @@ Verify the Snapshot Agent status to ensure the initial data transfer has started
 To verify the Snapshot Agent status and ensure your initial data transfer is proceeding correctly, you can use either the Graphical User Interface (SSMS) or a T-SQL query on the Distributor.
 
 Option 1: Using SQL Server Management Studio (SSMS)
-
+===========================================
 This is the most intuitive method for a quick visual check. 
    1. Connect to the Publisher instance in SSMS.
    2. Expand the Replication folder, then expand Local Publications.
@@ -162,7 +162,7 @@ This is the most intuitive method for a quick visual check.
       * Check the Message area for details like "Bulk copying data into table...". [1, 4, 5, 6, 7] 
    
 Option 2: Using T-SQL (On the Distributor)
-
+===========================================
 If you prefer scripting or need to check from a command line, run the following query on the server acting as the Distributor (usually your Publisher in this setup).
 
 USE distribution;
@@ -185,8 +185,8 @@ SELECT
     WHERE agent_id = p.id
 )ORDER BY p.publication;
 
-What to Look For
-
+What to Look For:
+=================
 * "Completed" Status: Once the Snapshot Agent finishes, it creates the schema and data files in your Snapshot Folder. Replication will not begin moving data until this status is achieved.
 * Distribution Agent: After the snapshot is ready, you must also check the Distribution Agent (via Replication Monitor) to ensure it is successfully applying those files to the Subscriber.
 * Agent Errors: If the status shows "Failed," check the Error details in SSMS. 
@@ -308,8 +308,8 @@ $Result = $Service.Change($null, $null, $null, $null, $null, $null, $NewUser, $N
     Write-Host "Failed to update service. Error code: $($Result.ReturnValue)" -ForegroundColor Red
 }
 
-Important Execution Details
-
+Important Execution Details:
+============================
 * Run as Administrator: You must launch the PowerShell console with Elevated Privileges for the Change method to work.
 * Service Name: If you are using a Named Instance (e.g., EC2AMAZ-ABC\SQL2019), the service name will be SQLAgent$SQL2019. You can find the exact name by running Get-Service *SQLAGENT*.
 * Downtime: Changing the service account [requires a restart](https://www.youtube.com/watch?v=30pw4O_hBvg) of the SQL Server Agent service. Existing replication jobs will pause briefly during this window.
@@ -331,6 +331,7 @@ Replication tasks typically require the following [security roles](https://learn
 * db_owner: Required on the distribution database and the specific publication or subscription database for the agent account to operate.
 
 T-SQL Configuration Script:
+===========================
 Run this script in SQL Server Management Studio (SSMS) on both the Publisher and Subscriber. 
 It creates the login for your local Windows user and grants it the necessary sysadmin role to bypass individual database permission hurdles.
 
@@ -430,9 +431,6 @@ SELECT
     END AS [AgentStatus],
     delivery_latency / 1000 AS [Latency_Seconds], -- Converted from ms
     last_run_getdate AS [LastSyncTime]FROM dbo.MSdistribution_historyWHERE id IN (SELECT MAX(id) FROM dbo.MSdistribution_history GROUP BY agent_id)ORDER BY last_run_getdate DESC;
-GO
-
-Why commands get "stuck" in Cross-Domain setups:
 
    1. Network Latency: High latency between AWS VPCs can slow down the acknowledgment of each batch of commands.
    2. Batch Size: The default -CommitBatchSize (100) might be too small for high-volume cross-domain traffic.
